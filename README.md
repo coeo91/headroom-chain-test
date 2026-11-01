@@ -5,6 +5,7 @@
 ```
 A 臂：客户端 → headroom → magpie → 供应商
 B 臂：客户端 → magpie → headroom → 供应商
+C 臂：magpie 也装到本机，A/B/0M 全走回环重跑（可选，用来消掉跨机变量）
 ```
 
 不花钱、不外传：全程打本地假供应商桩，桩会记录请求穿过链路后到底还剩什么。
@@ -36,9 +37,18 @@ python3 analyze.py --baseline 0M --out RESULTS.md
 | `stub.py` | 假供应商。记录字节数、needle 及上下文、逐条消息哈希、工具数、`cache_control` 块数、`content:null` 的 tool_call、长文本哈希、协议形状 |
 | `gen_payloads.py` | 生成 P1–P8 与 `manifest.json`（确定性，可复现） |
 | `run_arm.py` | 按臂发请求，每条打唯一 `cid` 便于配对，自动切换桩的日志通道 |
-| `analyze.py` | 按 `cid` 配对并出判定表，附带 V1–V5 自检 |
-| `RUNBOOK.md` | 完整测试手册（含五臂命令、magpie 配置、401 探针、12 条已知坑） |
+| `analyze.py` | 按 `cid` 配对并出判定表，附带 V1–V6 自检；跨机/同机分组可配置 |
+| `RUNBOOK.md` | 完整测试手册（五臂 + 可选 C 臂命令、magpie 配置、401 探针、15 条已知坑） |
 | `RESULTS-LOCAL.md` | 单机 0D / H 两臂的实测结果 |
+
+## 五条臂之外的可选 C 臂
+
+跨机对照最大的混淆是两台机器之间的 hop。C 臂把 magpie 也装到被测机，`0M-L / A-L / B-L` 全部走回环：
+
+- `0M-L` 与 `0M` 的差 = 跨机 hop 的成本；
+- `A-L / B-L` 与 `A / B` 的差 = 结论对网络拓扑有多敏感。
+
+`analyze.py` 默认就输出两组对照和一张"跨机 vs 同机"表，并多一条 V6 自检（两边压缩方向是否一致）。
 
 ## 主要结论（单机已实测）
 

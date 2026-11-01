@@ -8,7 +8,7 @@ B 臂：客户端 → magpie → headroom → 供应商
 ```
 
 所有命令都可直接粘贴。`<ubuntu-ip>`、`<magpie-ip>`、`<user>` 三处占位自己替换。
-本机（Windows）已经跑过的自检记录和踩过的坑在 §0 和 §11，先看，能省掉大部分返工。
+本机（Windows）已经跑过的自检记录和踩过的坑在 §0 和 §12，先看，能省掉大部分返工。
 
 ---
 
@@ -26,6 +26,8 @@ B 臂：客户端 → magpie → headroom → 供应商
 | 6 | **平局裁定** | 平局判给 **A（headroom 在内侧、magpie 在外侧）** | 理由：agent 的 base URL 始终由 magpie 管，headroom 的地址不会被 magpie 换模型时覆盖掉 |
 
 阈值来自本机实测：headroom 对一条 8.7k token 的工具输出能压掉 74.8%，对 5.6k token 的路径列表压掉 95.8%。5 个百分点在这个量级上足够区分"真压缩"和"抖动"。
+
+**可选 C 臂**（§7）：把 magpie 也装到 Ubuntu，A/B/0M 全走回环重跑一遍。只有当跨机结果反直觉时才需要——它的作用是证明"跨机 hop 没有制造假结论"，本身不产生新的架构结论。
 
 ---
 
@@ -50,6 +52,11 @@ B 臂：客户端 → magpie → headroom → 供应商
 | A | `127.0.0.1:8787` | magpie | 桩 | 桩 + magpie + headroom |
 | B | `<magpie-ip>:3425` | 桩 | headroom | 桩 + magpie + headroom |
 | H | `127.0.0.1:8787` | 桩 | — | 桩 + headroom |
+| **0M-L** | `127.0.0.1:3425` | — | 桩 | 桩 + magpie（同机，§7） |
+| **A-L** | `127.0.0.1:8787` | magpie | 桩 | 桩 + magpie（同机） + headroom |
+| **B-L** | `127.0.0.1:3425` | 桩 | headroom | 桩 + magpie（同机） + headroom |
+
+带 `-L` 的是可选 C 臂（magpie 也装在 Ubuntu，全链路回环），用来消掉跨机 hop 这个变量，见 §7。
 
 - **A 和 0M 共用同一份 magpie 配置**（magpie 上游都是桩），这是本设计的关键：两臂去掉 headroom 后是同一个拓扑，差额才归因给位置。
 - `H` 臂是归因臂：headroom 直接对桩，用来把"headroom 自身开销"和"magpie 干扰"分开。
@@ -227,6 +234,19 @@ PY
 
 magpie 固定 `127.0.0.1:3425`，同时讲 OpenAI Chat / Responses / Anthropic Messages。这里只要一个自定义 provider，上游按臂改。
 
+**先决条件：跨机访问必须开网关密钥。** magpie 默认只绑回环；把网关放到网络上（`MAGPIE_ADDR=0.0.0.0:3425` 或某个网卡地址）后，**来自非回环的请求要带一个已启用的网关密钥，否则 401；没开共享时直接 403**。所以在 magpie 那台机器上：
+
+1. 以网络地址起网关，并只放行 Ubuntu 的 IP：
+
+   ```bash
+   MAGPIE_ADDR=0.0.0.0:3425 MAGPIE_ALLOW_IPS=<ubuntu-ip> DO_NOT_TRACK=1 magpie serve
+   ```
+
+2. 在 Settings → Network and sharing 里建一个**启用状态**的网关密钥（CLI 对应命令用 `magpie --help` 确认）。
+3. Ubuntu 上跑臂时加 `--key <网关密钥>`，否则 0M/A/B 三臂全是 401。
+
+`DO_NOT_TRACK=1` 别省：magpie 默认每天上报一次"正在被使用"（随机 id、版本、系统、以及 agent/provider/model 的 id，不含 prompt/URL/key），测试期不需要。
+
 先确认 CLI 认的字段（不同版本一致的是 `url=`、`anthropic=`、`responses=`、`models=`、`header.<Name>=`，以 `--help` 输出为准）：
 
 ```bash
@@ -307,9 +327,103 @@ curl -s http://127.0.0.1:8787/health > results/health-H.json
 
 每臂 63 次请求（9 个单轮用例 + P5 的 12 轮，各重复 3 次）。任何一次失败都会让脚本以退出码 2 结束并打印前 10 条错误——**先解决失败再做下一臂**，失败的臂没有分析价值。
 
+跨机结果如果反直觉，再做可选的 C 臂（§7）。
+
 ---
 
-## 7. 测试用例与提示词
+## 7. 可选 C 臂：magpie 也装到本机
+
+跨机对照最大的混淆是"两台机器之间的 hop"：A 臂要经过 headroom→magpie 一次网络往返，B 臂要经过 magpie→headroom 一次，两者方向不同、延迟不对称。C 臂把 magpie 也装到 Ubuntu，三条臂全部走回环，把这个变量彻底消掉。
+
+| 臂 | 链路 | 与跨机臂的关系 |
+|---|---|---|
+| 0M-L | client → magpie → stub（全回环） | 同机版的 0M |
+| A-L | client → headroom → magpie → stub | 同机版的 A |
+| B-L | client → magpie → headroom → stub | 同机版的 B |
+
+C 臂不产生新结论，只用来验证跨机结论稳不稳：
+
+- `0M-L` 与 `0M` 的差 = 跨机 hop 的成本（通常只体现在延迟上，字节数应当几乎不变）。
+- `A-L / B-L` 与 `A / B` 的差 = A/B 结论对网络拓扑有多敏感。方向一致 → 跨机数据可信；方向相反 → 以 C 臂为准。
+
+### 7.1 装 magpie（Ubuntu，无 GUI）
+
+magpie 有终端版和无头 CLI，服务器上不需要桌面：
+
+```bash
+DO_NOT_TRACK=1 curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --tui
+magpie --version
+```
+
+也可以走 Docker（容器里网关绑 `0.0.0.0`，端口只映射到回环）：
+
+```bash
+docker run -d --name magpie \
+  -p 127.0.0.1:3425:3425 \
+  -e DO_NOT_TRACK=1 \
+  -v "$HOME/.config/magpie:/root/.config/magpie" \
+  ghcr.io/yetone/magpie
+```
+
+`DO_NOT_TRACK=1` 同上，别省。走 Docker 时注意：mapped 端口的对端是网桥而不是宿主回环，magpie 会把请求当**远程**处理，需要网关密钥——所以 §7.4 里的 `--key` 也要带上（这也是 §7.3 之后仍能跑通的唯一前提）。
+
+### 7.2 headless 起网关
+
+```bash
+MAGPIE_ADDR=127.0.0.1:3425 DO_NOT_TRACK=1 magpie serve
+```
+
+`MAGPIE_ADDR` 默认就是 `127.0.0.1:3425`，显式写死是防止历史配置把它带到网络上。全程回环时 magpie 对任何 token 都放行（"loopback remains permissive"），不需要网关密钥。
+
+### 7.3 配 provider
+
+与 §5 相同，只是地址换成本机：
+
+```bash
+magpie provider set stub url=http://127.0.0.1:18080 \
+                         anthropic=http://127.0.0.1:18080 \
+                         models=stub-model
+magpie provider refresh stub
+```
+
+### 7.4 跑三条臂
+
+顺序固定：0D → 0M-L → A-L →（改 magpie 上游）→ B-L。
+
+headroom 起法同 §4.1（上游 = magpie）和 §4.2（上游 = 桩），但**不需要 `--host 0.0.0.0`、不需要 ufw、不需要 ssh -R**，全程 `127.0.0.1`。
+
+```bash
+cd ~/hr
+
+# --- 阶段一：magpie 上游 = 桩（§7.3 的配置），headroom 上游 = magpie（§4.1）---
+./.venv/bin/python run_arm.py --arm 0M-L --url http://127.0.0.1:3425 --repeat 3
+./.venv/bin/python run_arm.py --arm A-L  --url http://127.0.0.1:8787 --repeat 3
+
+# --- 阶段二：改 magpie 上游 = headroom（§4.2 的 headroom，但绑 127.0.0.1）---
+magpie provider set stub url=http://127.0.0.1:8787 \
+                         anthropic=http://127.0.0.1:8787 \
+                         models=stub-model
+magpie provider refresh stub
+./.venv/bin/python run_arm.py --arm B-L --url http://127.0.0.1:3425 --repeat 3
+```
+
+### 7.5 出表
+
+```bash
+./.venv/bin/python analyze.py --baseline 0M --out RESULTS.md
+```
+
+报告会自动多出两组对照（`跨机 magpie` 与 `同机 magpie（C 臂）`）和一张 `跨机 vs 同机` 表。只想看某一组时可以显式指定：
+
+```bash
+./.venv/bin/python analyze.py --groups "同机 magpie:0D,0M-L,A-L,B-L"
+```
+
+自检里会多一条 **V6**：跨机与同机的压缩方向是否一致（跨机 Δ 小于 500 B 的用例视为持平，不计入）。
+
+---
+
+## 8. 测试用例与提示词
 
 大块内容全部放在**工具观察结果**里（`role:tool` / Anthropic 的 `tool_result`），这是唯一会被 headroom 压缩的位置；纯用户消息会被当 prompt 保护（P8 就是用来证明这一点的对照）。
 
@@ -330,7 +444,7 @@ curl -s http://127.0.0.1:8787/health > results/health-H.json
 
 ---
 
-## 8. 出表与判定
+## 9. 出表与判定
 
 ```bash
 cd ~/hr
@@ -338,11 +452,12 @@ cd ~/hr
 cat RESULTS.md
 ```
 
-看三处：
+看四处：
 
-1. **三段对照表**：`0D / 0M / A / B` 每用例的桩收到字节。`Δmagpie = 0M - 0D` 是 magpie 自己带来的开销；`Δheadroom(A) = A - 0M`、`Δheadroom(B) = B - 0M` 才是位置差异。注意 A 和 B 的分母都是 0M。
-2. **自检**：V1 / V1b / V2 / V3 / V4 / V5 六条，任何一条"未通过"都要先解释清楚再看结论。
-3. **P5 前缀稳定性**：必须是"逐轮一致"。
+1. **分组对照表**：默认两组——`跨机 magpie（A/B 主判据）` 是 `0D / 0M / A / B`，`同机 magpie（C 臂）` 是 `0D / 0M-L / A-L / B-L`。每组里第二列相对第一列（`0M - 0D` 是 magpie 自己的开销），其余相对第二列（`A - 0M`、`B - 0M` 才是位置差异）。A 和 B 的分母都是 0M。
+2. **每臂明细**：needle / 上下文 / 协议 / 工具数 / `cache_control` / `nullTC` / 长文本 / 延迟。
+3. **自检**：V1 / V1b / V2 / V3 / V4 / V5（跑了 C 臂还有 V6），任何一条"未通过"都要先解释清楚再看结论。
+4. **P5 前缀稳定性**：必须是"逐轮一致"。
 
 ### 读表时几个必看的格子
 
@@ -362,7 +477,7 @@ headroom capture network-diff --direct results/stub-0M.jsonl --headroom results/
 
 ---
 
-## 9. 401 透传探针（V4）
+## 10. 401 透传探针（V4）
 
 目的是确认：上游 401 的**错误体**能原样穿到客户端，而不是被中间层换成自己的 401/500。
 
@@ -394,7 +509,7 @@ STUB_PORT=18080 ./.venv/bin/python stub.py > logs/stub.log 2>&1 &
 
 ---
 
-## 10. 本机自检记录（已在 Windows 上跑通，供对照）
+## 11. 本机自检记录（已在 Windows 上跑通，供对照）
 
 | 用例 | 0D 桩收到字节 | H 桩收到字节 | 比值 | needle | 上下文 | 长文本 | 说明 |
 |---|---|---|---|---|---|---|---|
@@ -417,7 +532,7 @@ STUB_PORT=18080 ./.venv/bin/python stub.py > logs/stub.log 2>&1 &
 
 ---
 
-## 11. 已知坑（全部实测踩过）
+## 12. 已知坑（全部实测踩过）
 
 1. **装错包**：`pip install headroom` 得到的是另一个项目（0.2.7）。要 `headroom-ai[proxy]`。
 2. **匿名上传默认开着**：不加 `HEADROOM_BEACON=off`，会话摘要会传去 Headroom Labs。启动日志里确认这句：`Anonymous upload beacon: DISABLED`。
@@ -431,10 +546,13 @@ STUB_PORT=18080 ./.venv/bin/python stub.py > logs/stub.log 2>&1 &
 10. **CCR 工具注入**：headroom 会塞一个 `headroom_retrieve` 工具，工具数和 `cache_control` 各 +1。看 A/B 差异时要把这 1 个工具的开销算进 "headroom 成本"。
 11. **Kompress 冷启动**：约 2.6 秒，期间 `kompress: degraded`。跑测试前必须等 `healthy`。
 12. **多进程占端口**：反复起停会留下僵尸 stub/headroom，表现为"新进程启动日志正常但端口是旧的"。动手前先 `pgrep -af "stub.py|headroom proxy"` 清干净。
+13. **magpie 的每日上报**：默认每天报一次"正在被使用"（随机 id、版本、系统、agent/provider/model 的 id，不含 prompt/URL/key）。加 `DO_NOT_TRACK=1`。
+14. **跨机 magpie 默认 401/403**：网关只绑回环时，别的机器根本连不上；绑到网络后，非回环请求必须有已启用的网关密钥（401），且来源 IP 不在 `MAGPIE_ALLOW_IPS` 里会被 403。这类 401 会出现在 401 探针之前，别误判成上游拒绝。
+15. **ssh -R 到回环会被当成本机请求**：magpie 文档明确说裸 TCP 隧道（`ssh -R`、socat、frp tcp）无法与本机 agent 区分，所以 §4.2 的 ssh -R 方案不需要网关密钥——反过来也意味着它绕过了 magpie 的远程鉴权，只能用于本机测试，不要当成共享部署方案。
 
 ---
 
-## 12. 这套测试测不到什么
+## 13. 这套测试测不到什么
 
 - **真实供应商的 prefix 缓存**：桩不做 KV cache，`cache_read` 只能从 `magpie usage` 侧看。
 - **公网延迟**：本机/局域网回环上的延迟差不能外推。

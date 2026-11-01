@@ -155,6 +155,109 @@ def pair_cell(seen, expected):
     return str(seen) if expected is None else "%s/%s" % (seen, expected)
 
 
+def parse_groups(specs):
+    """`--groups 标签:臂1,臂2,...`；不写标签就用臂名拼一个。"""
+    groups = []
+    for spec in specs:
+        spec = spec.strip()
+        if not spec:
+            continue
+        if ":" in spec:
+            label, arms = spec.split(":", 1)
+        else:
+            label, arms = "", spec
+        arms = [a.strip() for a in arms.split(",") if a.strip()]
+        if len(arms) < 2:
+            raise SystemExit("--groups 至少要两个臂：%s" % spec)
+        groups.append((label or " → ".join(arms), arms))
+    return groups
+
+
+def delta_str(x, y):
+    if x is None or y is None or not x:
+        return "-"
+    return "%+d (%.1f%%)" % (y - x, 100.0 * y / x)
+
+
+def compare_block(all_rows, manifest, label, arms):
+    """第一列是绝对基准，第二列相对第一列，其余相对第二列。
+
+    这样 A/B 组的 Δ 是"加不加 headroom"（相对 0M），C 组的 Δ 同理（相对 0M-L），
+    两组之间可以直接横向比。
+    """
+    base_arm, ref_arm = arms[0], arms[1]
+    head = [arms[0] + " 原始", arms[1], "Δ(%s-%s)" % (arms[1], arms[0])]
+    for a in arms[2:]:
+        head += [a, "Δ(%s-%s)" % (a, arms[1])]
+    lines = ["### %s" % label, "", "| 用例 | " + " | ".join(head) + " |", "|" + "---|" * (len(head) + 1)]
+    for c in manifest["cases"]:
+        name = c["case"]
+
+        def get(arm):
+            return all_rows.get(arm, {}).get(name, {}).get("bytes")
+
+        row = [name, fmt_bytes(get(base_arm)), fmt_bytes(get(ref_arm)), delta_str(get(base_arm), get(ref_arm))]
+        for a in arms[2:]:
+            row += [fmt_bytes(get(a)), delta_str(get(ref_arm), get(a))]
+        lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
+    return lines
+
+
+def topology_block(all_rows, manifest, pairs):
+    """跨机 vs 同机：同一位置的 headroom 收益差多少。
+
+    pairs: [(名字, (基线臂, 目标臂), (同机基线臂, 同机目标臂)), ...]
+    """
+    usable = [
+        (name, cross, local)
+        for name, cross, local in pairs
+        if all(a in all_rows for a in cross + local)
+    ]
+    if not usable:
+        return []
+
+    lines = ["## 跨机 vs 同机（C 臂）", ""]
+    head = ["用例"]
+    for name, _, _ in usable:
+        head += ["%s 跨机 Δ" % name, "%s 同机 Δ" % name, "%s 差" % name]
+    lines.append("| " + " | ".join(head) + " |")
+    lines.append("|" + "---|" * len(head))
+
+    per_pair = {name: [] for name, _, _ in usable}
+    for c in manifest["cases"]:
+        name = c["case"]
+        row = [name]
+        for pname, cross, local in usable:
+            def d(pair):
+                b = all_rows[pair[0]].get(name, {}).get("bytes")
+                a = all_rows[pair[1]].get(name, {}).get("bytes")
+                return None if (b is None or a is None) else a - b
+
+            dc, dl = d(cross), d(local)
+            if dc is None or dl is None:
+                row += ["-", "-", "-"]
+                continue
+            per_pair[pname].append((name, dc, dl, dl - dc))
+            row += ["%+d" % dc, "%+d" % dl, "%+d" % (dl - dc)]
+        lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
+
+    for pname, cross, local in usable:
+        diffs = per_pair[pname]
+        if not diffs:
+            continue
+        worst = max(diffs, key=lambda x: abs(x[3]))
+        real = [x for x in diffs if abs(x[1]) >= 500]
+        agreed = sum(1 for x in real if (x[1] <= 0) == (x[2] <= 0))
+        lines.append(
+            "- %s：差值最大 %s（跨机 %+d B，同机 %+d B）；压缩方向一致 %d/%d 个用例（跨机 Δ<500B 的视为持平，不计入）"
+            % (pname, worst[0], worst[1], worst[2], agreed, len(real))
+        )
+    lines.append("")
+    return lines
+
+
 def table(arm, rows, base_rows, baseline):
     lines = []
     lines.append("### 臂 %s" % arm)
@@ -192,8 +295,22 @@ def main():
     ap.add_argument("--results", default="results")
     ap.add_argument("--manifest", default="payloads/manifest.json")
     ap.add_argument("--baseline", default=DEFAULT_BASELINE)
+    ap.add_argument(
+        "--groups",
+        action="append",
+        metavar="标签:臂1,臂2,...",
+        help="对照表的分组，可重复。默认两个：跨机 A/B 与同机 C 臂",
+    )
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    groups = parse_groups(
+        args.groups
+        or [
+            "跨机 magpie（A/B 主判据）:0D,0M,A,B",
+            "同机 magpie（C 臂）:0D,0M-L,A-L,B-L",
+        ]
+    )
 
     with open(args.manifest, encoding="utf-8") as f:
         manifest = json.load(f)
@@ -215,28 +332,17 @@ def main():
     out.append("")
     out.append("基线臂 = `%s`（两臂去掉 headroom 后的同一拓扑）" % args.baseline)
     out.append("")
-    out.append("## 三段对照")
+    out.append("每组里：第一列绝对字节，第二列相对第一列，其余相对第二列（即同一拓扑下\"加不加 headroom\"）。")
     out.append("")
-    out.append("| 用例 | 0D 原始 | 0M 过 magpie | Δmagpie | A 过 magpie→headroom? | Δheadroom(A) | B | Δheadroom(B) |")
-    out.append("|---|---|---|---|---|---|---|---|")
-    for c in manifest["cases"]:
-        name = c["case"]
-
-        def get(arm):
-            return all_rows.get(arm, {}).get(name, {}).get("bytes")
-
-        d0, m0, a, b = get("0D"), get("0M"), get("A"), get("B")
-
-        def delta(x, y):
-            if x is None or y is None:
-                return "-"
-            return "%+d (%.1f%%)" % (y - x, 100.0 * y / x)
-
-        out.append(
-            "| %s | %s | %s | %s | %s | %s | %s | %s |"
-            % (name, fmt_bytes(d0), fmt_bytes(m0), delta(d0, m0), fmt_bytes(a), delta(m0, a), fmt_bytes(b), delta(m0, b))
-        )
-    out.append("")
+    for label, g_arms in groups:
+        missing = [a for a in g_arms if a not in all_rows]
+        if missing:
+            out.append("### %s" % label)
+            out.append("")
+            out.append("- 缺臂：%s（跳过）" % "、".join("`%s`" % a for a in missing))
+            out.append("")
+            continue
+        out.extend(compare_block(all_rows, manifest, label, g_arms))
 
     for arm in arms:
         out.extend(table(arm, all_rows[arm], base_rows, args.baseline))
@@ -257,6 +363,17 @@ def main():
         for d in detail:
             out.append(d)
     out.append("")
+
+    out.extend(
+        topology_block(
+            all_rows,
+            manifest,
+            [
+                ("A", ("0M", "A"), ("0M-L", "A-L")),
+                ("B", ("0M", "B"), ("0M-L", "B-L")),
+            ],
+        )
+    )
 
     out.append("## 自检")
     out.append("")
@@ -291,22 +408,55 @@ def main():
     else:
         v.append(("V3 H 臂对 P1/P2 有真实压缩", False, "缺 H 或 0D 臂"))
 
-    if "A" in all_rows and "B" in all_rows:
+    for x, y in (("A", "B"), ("A-L", "B-L")):
+        if x not in all_rows or y not in all_rows:
+            continue
         same = []
         for c in manifest["cases"]:
-            a = all_rows["A"].get(c["case"], {}).get("bytes")
-            b = all_rows["B"].get(c["case"], {}).get("bytes")
+            a = all_rows[x].get(c["case"], {}).get("bytes")
+            b = all_rows[y].get(c["case"], {}).get("bytes")
             if a is not None and b is not None and a == b:
                 same.append(c["case"])
+        tried = [
+            c["case"]
+            for c in manifest["cases"]
+            if all_rows[x].get(c["case"], {}).get("bytes") is not None
+            and all_rows[y].get(c["case"], {}).get("bytes") is not None
+        ]
         v.append(
             (
-                "V5 A 与 B 的请求体不完全相同（相同说明中间层没生效）",
+                "V5 %s 与 %s 的请求体不完全相同（相同说明中间层没生效）" % (x, y),
                 not same,
-                ("完全相同的用例：" + ",".join(same)) if same else "存在差异",
+                ("完全相同的用例：" + ",".join(same)) if same else "%d/%d 个用例存在差异" % (len(tried), len(tried)),
             )
         )
-    else:
-        v.append(("V5 A 与 B 的请求体不完全相同", False, "缺 A 或 B 臂"))
+
+    if "0M-L" in all_rows and ("A-L" in all_rows or "B-L" in all_rows):
+        rows = []
+        for pname, cross, local in (("A", ("0M", "A"), ("0M-L", "A-L")), ("B", ("0M", "B"), ("0M-L", "B-L"))):
+            if not all(a in all_rows for a in cross + local):
+                continue
+            for c in manifest["cases"]:
+                name = c["case"]
+
+                def d(pair):
+                    b = all_rows[pair[0]].get(name, {}).get("bytes")
+                    a = all_rows[pair[1]].get(name, {}).get("bytes")
+                    return None if (b is None or a is None) else a - b
+
+                dc, dl = d(cross), d(local)
+                if dc is not None and dl is not None and abs(dc) >= 500:
+                    rows.append((pname, name, dc, dl))
+        bad = [r for r in rows if (r[2] <= 0) != (r[3] <= 0)]
+        v.append(
+            (
+                "V6 同机臂与跨机臂的压缩方向一致",
+                not bad,
+                ("方向相反的用例：%s" % "、".join("%s/%s" % (r[0], r[1]) for r in bad))
+                if bad
+                else "%d 个有明显压缩的用例方向一致" % len(rows),
+            )
+        )
 
     forced = any(
         rec.get("forced_401") for path in all_stub_logs(args.results) for rec in load_jsonl(path)
