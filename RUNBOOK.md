@@ -355,17 +355,19 @@ DO_NOT_TRACK=1 curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --tui
 magpie --version
 ```
 
-也可以走 Docker（容器里网关绑 `0.0.0.0`，端口只映射到回环）：
+也可以走 Docker（镜像里 `MAGPIE_ADDR=0.0.0.0:3425` 是写死的，配置目录在 `/config/magpie`）：
 
 ```bash
 docker run -d --name magpie \
   -p 127.0.0.1:3425:3425 \
   -e DO_NOT_TRACK=1 \
-  -v "$HOME/.config/magpie:/root/.config/magpie" \
+  -v "$HOME/.config/magpie:/config/magpie" \
   ghcr.io/yetone/magpie
 ```
 
-`DO_NOT_TRACK=1` 同上，别省。走 Docker 时注意：mapped 端口的对端是网桥而不是宿主回环，magpie 会把请求当**远程**处理，需要网关密钥——所以 §7.4 里的 `--key` 也要带上（这也是 §7.3 之后仍能跑通的唯一前提）。
+`DO_NOT_TRACK=1` 别省：magpie 默认每天上报一次使用情况（随机 id、版本、系统、agent/provider/model 的 id，不含 prompt/URL/key）。
+
+**注意**：Docker 端口映射的对端是网桥而不是宿主回环，magpie 会把请求当成**远程**，所以即使端口只映射到回环，也仍然需要网关密钥。想把 C 臂做成"完全不需要密钥"的干净形态，用上面的原生安装，别用 Docker。
 
 ### 7.2 headless 起网关
 
