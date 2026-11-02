@@ -774,13 +774,17 @@ STUB_PORT=18080 .venv/Scripts/python.exe stub.py > logs/stub.log 2>&1 &
 8. **只压工具输出**：用户消息永远不压（除显式 `compress_user_messages=true` 且不是 prompt turn）。把大内容放用户消息里测压缩，会得到"压不动"的假结论——这就是 P8 存在的原因。
 9. **cache mode 冻结前缀**：`Pipeline: freezing first 2/3 messages`。多轮里靠前的内容压不到，别指望 P5 出压缩率。
 10. **CCR 工具注入**：headroom 会塞一个 `headroom_retrieve` 工具，工具数和 `cache_control` 各 +1。看 A/B 差异时要把这 1 个工具的开销算进 "headroom 成本"。
-11. **Kompress 冷启动**：约 2.6 秒，期间 `kompress: degraded`。跑测试前必须等 `healthy`。
-12. **多进程占端口（Windows）**：反复起停会留下僵尸 python/headroom，表现为"新进程启动日志正常但端口是旧的"。用 `netstat -ano | grep :8787` 找 PID 再 `taskkill //PID <pid> //F`，不要按进程名猜；Git Bash 里没有 `pgrep`。
+11. **Kompress 冷启动是几十秒不是几秒**：实测已缓存模型时约 **10–15 秒**到 `healthy`，首次要下载 ONNX 模型时约 **25–30 秒**，期间 `kompress: degraded`。别用固定 `sleep 3` 猜，按 §5.3 轮询，并同时核对 `checks.upstream.url`。
+12. **`netstat`/`Get-NetTCPConnection` 看不到这些回环监听**：本机实测 8787/18080/3425 都查不到 PID，按端口反查会得到空结果，然后旧的 headroom 继续应答 `/health`，看起来像"配置没生效"。**按镜像名杀**：`taskkill //F //IM headroom.exe //T`、`taskkill //F //IM magpie.exe //T`；桩用 `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` 按命令行匹配 `stub.py`（限定 python.exe 才不会被误杀，别用裸命令行通配）。
 13. **magpie 的每日上报**：默认每天报一次"正在被使用"（随机 id、版本、系统、agent/provider/model 的 id，不含 prompt/URL/key）。加 `DO_NOT_TRACK=1`。
 14. **跨机 magpie 默认 401/403**：网关只绑回环时，别的机器根本连不上；绑到网络后，非回环请求必须有已启用的网关密钥（401），且来源 IP 不在 `MAGPIE_ALLOW_IPS` 里会被 403。这类 401 会出现在 401 探针之前，别误判成上游拒绝。
 15. **ssh -R 到回环会被当成本机请求**：magpie 文档明确说裸 TCP 隧道（`ssh -R`、socat、frp tcp）无法与本机 agent 区分，所以 §8.2 的 ssh -R 方案不需要网关密钥——反过来也意味着它绕过了 magpie 的远程鉴权，只能用于本机测试，不要当成共享部署方案。
-16. **magpie 是滚动版本**：release 几乎每天更新（本文固定 `v0.1.2683`）。复现实验要按 §2.1 的 tag + sha256 下，不要用 `@latest`；CLI-only 与 GUI 构建是两个资产，别混。
+16. **magpie 是滚动版本**：release 几乎每天更新（本文固定 `v0.1.2687`，2026-11-02 核对）。复现实验要按 §2.1 的 tag + sha256 下，不要用 `@latest`；以 `https://usemagpie.ai/api/latest` 返回的 version+sha256 为准；CLI-only 与 GUI 构建是两个资产，别混。
 17. **magpie 会改写 agent 配置**：在 GUI/CLI 里选模型时，它会把各 agent 的 base URL 指回 `3425`。这正是规则 6 判 B 的原因；也意味着 A 方案下每次换模型后都要重新把 agent 指回 `8787`。
+18. **没有 `magpie provider refresh` 这个命令**（v0.1.2687 实测）：模型目录在 `provider set` / `provider add` 时自动拉取，`provider <id>` 输出里会写 "fetched just now"。文档里任何 `refresh` 步骤都是错的。
+19. **翻译档要求桩会吐 SSE**：只配 `url=` 时 magpie 往上游发的是流式请求（哪怕客户端要非流式），桩不回 SSE 就会得到 `stub did not stream: unexpected reply` 和 502。`stub.py` 已按 `stream` 字段分流。
+20. **翻译档会丢掉全部 cid**：magpie 改写协议时丢掉 body 里的 `metadata`、`X-Cid` 头**和** URL 查询串，桩那边配对不上（本机表现为 `未配对 6 次`）。`analyze.py` 因此加了按内容标记的兜底配对（`fallback_pair`），只用用例之间**不共用**的标记打分，平局就跳过、绝不瞎猜。看到"未配对 0 次（其中 N 次靠内容兜底配对）"是正常的。
+21. **选错 magpie 档位会得出"A 和 B 一模一样"的假结论**：provider 同时配了 `url=`/`anthropic=`/`responses=` 就是直通档，A-L 与 B-L 必然逐字节相同。主判据要用翻译档（只配 `url=`），直通档只作阴性对照（§3.1、§6.0、§15）。
 
 ---
 
@@ -792,3 +796,39 @@ STUB_PORT=18080 .venv/Scripts/python.exe stub.py > logs/stub.log 2>&1 &
 - **P3 这类非结构化日志**：实测只压 1.9%，它在这套表里基本是个"透传对照"，不要拿它当压缩收益的代表。
 - **magpie 的脱敏改写**：magpie 会在出本机前做占位符替换，桩看到的是脱敏后的文本。如果 A-L/B-L 两臂在这个环节有差异，会被误读成"位置差异"——判读时对照 `request_json` 里的字段名是否被改写。
 - **Qoder 的真实请求形态**：桩用的是构造出来的 P1–P8，不是 Qoder 的真实会话。链路选型成立后，仍要用 `magpie usage` 在真实会话上复核一次。
+
+---
+
+## 15. 实测结论（2026-11-02，本机 Windows 同机）
+
+原始表在 [`RESULTS-SAMEMACHINE.md`](RESULTS-SAMEMACHINE.md)（翻译档）和 [`RESULTS-PASSTHROUGH.md`](RESULTS-PASSTHROUGH.md)（直通档）。
+
+### 翻译档（主路径）：位置差只在 Anthropic 原生用例上出现
+
+P1–P6、P7b、P8 的 A-L 与 B-L **逐字节相同**。原因不是中间层没生效（V5 已证明两臂相对 0M-L 都真的压缩了），而是这些用例在 magpie 那一侧已经被翻成同一种 OpenAI Chat 请求，"headroom 在翻译前还是翻译后"对它不再产生可观测差异。
+
+唯一有差别的是 P7a（Anthropic 原生：system 数组 + `cache_control` + 12 个工具）：
+
+- B-L 收到 2793 B，比 0M-L 只多 11 B；
+- A-L 收到 3275 B，比 0M-L 多 493 B，比 B-L 多 **482 B**。
+
+原因是 A 方案里 headroom 在 magpie 上游，它注入的 `headroom_retrieve` 和 `cache_control` 进了 Anthropic 请求体，magpie 再把这些一并翻译放大；B 方案里 magpie 先把请求翻成 OpenAI Chat，headroom 只看到 Chat 形状（工具数仍是 12/12），不再额外注入。
+
+P7c（Responses 形状）两臂只差 11 B，可忽略。
+
+### 直通档（对照）：A-L 与 B-L 在全部 10 个用例上逐字节相同
+
+这一档 magpie 同时配了 `url=`/`anthropic=`/`responses=`，三套协议各自原样透传，headroom 放在前还是后不改变任何一个字节。它证明的是 harness 能正确识别"位置不可观测"的状态，而不是 A/B 无差别。
+
+### 判定
+
+按 §0 的顺序：保真全过、配对 `未配对 0 次`、两臂压缩方向一致。规则 3 在翻译档下大部分用例打平（逐字节相同），走规则 6 平局裁定；唯一有量化的用例 P7a 也指向 B。
+
+**结论：选 B（headroom 在外侧、magpie 在内侧）。** 量化上 B 在 P7a 少 482 B，定性上 B 不会被 magpie 换模型时改写 agent 配置的行为绕过（§0 规则 6）。
+
+### 复测时必须一起看的东西
+
+- `协议(见/期)` 在翻译档下是 `openai_chat` 是**预期**，不是配错；只有你本意是直通档时才该是 `anthropic`。
+- `未配对 0 次（其中 N 次靠内容兜底配对）`：N>0 说明翻译档丢了 cid，属正常；未配对本身不为 0 才是问题。
+- P5 前缀稳定性必须"逐轮一致"，否则规则 4 否决，上面的横向比较都不用看。
+- 换了 magpie 版本、换机器、换真实供应商，结论都要重测——本表只覆盖 v0.1.2687 + 假桩 + 构造用例。

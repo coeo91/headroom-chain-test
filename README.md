@@ -16,7 +16,7 @@ H     客户端 → headroom → 桩           归因：headroom 单独贡献
 
 不花钱、不外传：全程打本地假供应商桩，桩会记录请求穿过链路后到底还剩什么。
 
-完整步骤见 **[RUNBOOK.md](RUNBOOK.md)**，本机自检数据见 **[RESULTS-LOCAL.md](RESULTS-LOCAL.md)**。
+完整步骤见 **[RUNBOOK.md](RUNBOOK.md)**，本机自检数据见 **[RESULTS-SAMEMACHINE.md](RESULTS-SAMEMACHINE.md)**（翻译档，主判据）和 **[RESULTS-PASSTHROUGH.md](RESULTS-PASSTHROUGH.md)**（直通档，阴性对照）。
 
 ## 为什么不是"看文档选一个"
 
@@ -79,8 +79,10 @@ curl -s https://usemagpie.ai/api/latest
 | `gen_payloads.py` | 生成 P1–P8 与 `manifest.json`（确定性，可复现） |
 | `run_arm.py` | 按臂发请求，每条打唯一 `cid` 便于配对，自动切换桩的日志通道 |
 | `analyze.py` | 按 `cid` 配对并出判定表，附带 V1–V6 自检；同机/跨机分组可配置，基线臂自动选 `0M-L` |
-| `RUNBOOK.md` | 完整测试手册（同机五臂、十分钟一键块、跨机抽查、401 探针、17 条已知坑） |
-| `RESULTS-LOCAL.md` | 单机 0D / H 两臂的实测结果 |
+| `RUNBOOK.md` | 完整测试手册（同机五臂、十分钟一键块、跨机抽查、401 探针、21 条已知坑、§15 实测结论） |
+| `RESULTS-SAMEMACHINE.md` | 翻译档实测：0D / 0M-L / A-L / B-L / H 五臂 |
+| `RESULTS-PASSTHROUGH.md` | 直通档阴性对照：A-L 与 B-L 逐字节相同 |
+| `RESULTS-LOCAL.md` | 早期单机 0D / H 两臂的记录 |
 
 ## 跨机抽查（可选）
 
