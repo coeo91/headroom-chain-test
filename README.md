@@ -20,6 +20,17 @@ H     客户端 → headroom → 桩           归因：headroom 单独贡献
 
 完整步骤见 **[RUNBOOK.md](RUNBOOK.md)**，本机自检数据见 **[RESULTS-SAMEMACHINE.md](RESULTS-SAMEMACHINE.md)**（翻译档，主判据）和 **[RESULTS-PASSTHROUGH.md](RESULTS-PASSTHROUGH.md)**（直通档，阴性对照）。
 
+## 结论（2026-11-02，Windows 同机）
+
+细节和判定过程见 RUNBOOK §15。
+
+- **串联顺序选 B**：`agent → magpie(3425) → headroom(8787) → 供应商`，即 headroom 在外侧、magpie 在内侧。翻译档下十个用例里有八个两臂逐字节相同；唯一有量化的 P7a（Anthropic 原生）B 侧 2793 B，比 A 侧的 3275 B 少 482 B。剩下的平局按 §0 规则判给 B，因为 magpie 换模型时会原子改写 agent 的 base URL，A 方案每次换模型都会被绕过。
+- **兼容性问题归 magpie**：翻译档会把 body `metadata`、`X-Cid` 头、URL 查询串一起丢掉，附带丢 `cache_control`（客户端 1、上游 0，工具数 12/12 保住）；直通档三样都保留。已提报 [magpie #4899](https://github.com/yetone/magpie/issues/4899)。
+- **headroom 只压工具观察结果**，用户消息被保护；压缩率高度依赖内容，工具输出和路径列表收益大，真实构建日志几乎压不动。cache mode 会冻结前缀，并注入一个检索工具和一个 `cache_control`。实测贴在 [headroom #4612](https://github.com/headroomlabs-ai/headroom/discussions/4612)。
+- **主判据必须用翻译档**：直通档配置下 A-L 与 B-L 全部用例逐字节相同，位置差不可观测——那不是"两臂无差别"，是选错配置会得到的假结论。
+
+**边界**：只覆盖本机 Windows、magpie `v0.1.2687` + 本地假桩 + 构造用例。跨机抽查（`0M`/`A`/`B`）没跑，Ubuntu 面板部署没在真机验证过；换版本、换机器、换真实供应商都要重测。
+
 ## 为什么不是"看文档选一个"
 
 两臂的区别不在功能，在**可观测的取舍**：
