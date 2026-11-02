@@ -89,7 +89,8 @@ H     客户端 → headroom → 桩              （归因：headroom 单独贡
 
 ```bash
 cd /c/22/headroom-chaintest
-"C:/Users/WorBudd/AppData/Local/Python/pythoncore-3.14-64/python.exe" -m venv .venv
+# Windows 上用 py 启动器建虚拟环境；没有 py 就写你的 Python 3.10+ 绝对路径
+py -3 -m venv .venv
 .venv/Scripts/python.exe -m pip install --upgrade pip
 .venv/Scripts/python.exe -m pip install "headroom-ai[proxy]==0.42.0"
 .venv/Scripts/headroom.exe --version

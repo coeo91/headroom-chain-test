@@ -16,6 +16,8 @@ H     客户端 → headroom → 桩           归因：headroom 单独贡献
 
 不花钱、不外传：全程打本地假供应商桩，桩会记录请求穿过链路后到底还剩什么。
 
+本仓库是独立的第三方测量工具，与 headroom、magpie 官方没有隶属或背书关系；报告里会写明这一点。
+
 完整步骤见 **[RUNBOOK.md](RUNBOOK.md)**，本机自检数据见 **[RESULTS-SAMEMACHINE.md](RESULTS-SAMEMACHINE.md)**（翻译档，主判据）和 **[RESULTS-PASSTHROUGH.md](RESULTS-PASSTHROUGH.md)**（直通档，阴性对照）。
 
 ## 为什么不是"看文档选一个"
@@ -35,11 +37,11 @@ Windows（Git Bash），仓库在 `/c/22/headroom-chaintest`：
 
 ```bash
 cd /c/22/headroom-chaintest
-"C:/Users/WorBudd/AppData/Local/Python/pythoncore-3.14-64/python.exe" -m venv .venv
+py -3 -m venv .venv          # 没有 py 就写你的 Python 3.10+ 绝对路径
 .venv/Scripts/python.exe -m pip install "headroom-ai[proxy]==0.42.0"
 mkdir -p bin results logs
 curl -fL --retry 3 -o bin/magpie.exe \
-  https://github.com/yetone/magpie/releases/download/v0.1.2683/magpie-cli-windows-amd64.exe
+  https://github.com/yetone/magpie-releases/releases/download/v0.1.2687/magpie-cli-windows-amd64.exe
 .venv/Scripts/python.exe gen_payloads.py
 ```
 
