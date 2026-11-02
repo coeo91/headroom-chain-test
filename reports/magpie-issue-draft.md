@@ -1,85 +1,78 @@
-# Draft: magpie issue
+# Draft: magpie issue（中文正文）
 
-Target repo: `yetone/magpie` (issues enabled, MIT, no issue templates).
-Suggested title (matches repo convention of `area: symptom`):
+目标仓库：`yetone/magpie`（issues 开着，MIT，无 issue 模板，无 Discussions）。
+建议标题（沿用仓库的 `area: 现象` 前缀习惯）：
 
-    gateway: protocol translation drops caller correlation carriers (body metadata, X-Cid header, URL query string)
+    gateway: 协议翻译会丢掉调用方的关联载体（body metadata、X-Cid 头、URL 查询串）
 
 ---
 
-## What happens
+## 现象
 
-When a provider is configured in translation mode (only `url=`, no `anthropic=` / `responses=`),
-a request that arrives as Anthropic Messages or OpenAI Responses is translated to OpenAI Chat
-before it goes upstream. During that translation, every caller-supplied correlation carrier I
-tried is dropped:
+provider 配成翻译档（只配 `url=`，不配 `anthropic=` / `responses=`）时，进来的
+Anthropic Messages 或 OpenAI Responses 请求会先被翻成 OpenAI Chat 再发上游。
+翻译过程中，我试过的三个关联载体全部丢失：
 
-- `metadata` object in the request body,
-- `X-Cid` request header,
-- `cid` in the URL query string.
+- 请求体里的 `metadata` 对象；
+- 请求头 `X-Cid`；
+- URL 查询串里的 `cid`。
 
-The upstream sees a normal Chat completion request with none of them, so a caller cannot match
-an upstream observation back to the request that produced it.
+上游收到的是一条普通的 Chat 请求，三样都没有，调用方无法把上游观测和原始请求对上。
 
-Configure the same provider in pass-through mode (`url=` + `anthropic=` + `responses=`) and all
-three carriers survive unchanged.
+同一个 provider 改成直通档（`url=` + `anthropic=` + `responses=`），三个载体都原样保留。
 
-## Environment
+## 环境
 
-- magpie 0.1.2687, `magpie-cli-windows-amd64.exe`,
+- magpie 0.1.2687，`magpie-cli-windows-amd64.exe`，
   sha256 `1fa70112864d6d39d6e5e97d8895248085296a483843f4f5cf6c26bfe869a83f`
-- Windows 11, loopback only (`MAGPIE_ADDR=127.0.0.1:3425`, `DO_NOT_TRACK=1`)
-- upstream is a local recording stub, so "what arrived" is exact bytes, not a log summary
+- Windows 11，只绑回环（`MAGPIE_ADDR=127.0.0.1:3425`，`DO_NOT_TRACK=1`）
+- 上游是一个本地落盘桩，记录的是实际收到的字节，不是日志摘要
 
-## Minimal reproduction
+## 最小复现
 
-1. Start a stub that records method, path, query string, headers and raw body, then answers with SSE
-   (magpie streams upstream even for non-streaming client requests, so a non-SSE stub fails with
-   `did not stream`).
+1. 起一个桩：记录 method、path、query string、headers 和原始 body，并且回 SSE
+   （翻译档下 magpie 对上游发的是流式请求，即使客户端要的是非流式；桩不回 SSE 会得到
+   `did not stream` 和 502）。
 2. `magpie provider set stub url=http://127.0.0.1:18080 models=stub-model`
-3. POST an Anthropic request to `http://127.0.0.1:3425/v1/messages?cid=abc123` with:
-   - header `X-Cid: abc123`
-   - body `"metadata": {"cid": "abc123"}`
-4. Inspect what the stub received.
+3. 向 `http://127.0.0.1:3425/v1/messages?cid=abc123` 发一条 Anthropic 请求，同时带：
+   - 请求头 `X-Cid: abc123`
+   - body 里 `"metadata": {"cid": "abc123"}`
+4. 看桩实际收到了什么。
 
-Expected: at least one of the three survives, so the caller can correlate.
-Actual: none of them present. Repeating the same call with `provider set stub url=... anthropic=... responses=...`
-makes all three survive.
+预期：三者里至少有一个能活下来，调用方可以据此关联。
+实际：三个都不在。把 provider 改成 `url=... anthropic=... responses=...` 再发一次，
+三个都完整保留。
 
-Reproduction harness (public, synthetic payloads only, no keys, no real provider calls):
+复现用的 harness 是公开的、只有合成负载，没有密钥，也不打真实供应商：
 `https://github.com/coeo91/headroom-chain-test`
-The two configurations are described in RUNBOOK §6.0, and the raw comparison is in
-`RESULTS-SAMEMACHINE.md` vs `RESULTS-PASSTHROUGH.md`.
+两档配置的说明在 RUNBOOK §6.0，原始对照在 `RESULTS-SAMEMACHINE.md` 和
+`RESULTS-PASSTHROUGH.md`。
 
-## Evidence from the test run
+## 测试里的证据
 
-Ten cases, 3 repetitions each. In translation mode, exactly the two cases that arrive in a
-non-Chat protocol failed correlation and had to be matched by content instead:
+十个用例，每个跑 3 次。翻译档下，恰好是那两条以非 Chat 协议进来的用例关联失败，
+只能改用内容标记兜底配对：
 
-    arm 0M-L  63 sent / 63 received / 0 unmatched, of which 6 recovered by content fallback
-    arm A-L   63 / 63 / 0, 6 by fallback
-    arm B-L   63 / 63 / 0, 6 by fallback
+    臂 0M-L   发出 63 / 收到 63 / 未配对 0，其中 6 次靠内容兜底
+    臂 A-L    发出 63 / 收到 63 / 未配对 0，其中 6 次靠内容兜底
+    臂 B-L    发出 63 / 收到 63 / 未配对 0，其中 6 次靠内容兜底
 
-In pass-through mode there was no fallback at all — cid matched on every one of the 63 requests
-per arm. So the loss tracks the translation path, not the surrounding proxies.
+同一套用例换直通档，一次兜底都不需要——每条臂 63 次请求全部靠 cid 配对成功。
+所以丢失跟着翻译路径走，和前后串了哪些代理无关。
 
-## Impact
+## 影响
 
-- Any caller that relies on request correlation (tracing, per-request accounting, A/B comparison)
-  loses attribution as soon as magpie translates.
-- Clients that put per-request parameters in the query string (common for proxies and test
-  harnesses) see them silently disappear.
-- Header and body `metadata` are the conventional places for this, so both are affected too.
+- 依赖请求关联的调用方（链路追踪、按请求计费、A/B 对照）一旦经过翻译档就失去归因。
+- 把每请求参数放在查询串里的客户端（代理和测试 harness 里很常见）会静默丢参数。
+- 头和 body `metadata` 是这类信息的常规位置，现在两条路都受影响。
 
-## Additional observation (separate, lower priority)
+## 附带观察（单独、低优先级）
 
-In translation mode, `cache_control` on an Anthropic request is also lost: the client sent one
-`cache_control` block, the upstream received zero, with the gateway alone in the path
-(no other proxy involved). The tool list survived (12/12), so this is specific to
-`cache_control` rather than to the whole block structure.
+翻译档下 Anthropic 请求的 `cache_control` 也会丢：客户端发了 1 个 `cache_control` 块，
+上游收到 0 个，而且这条链路上没有别的代理（只有 magpie）。工具列表是 12/12 保住的，
+所以丢的是 `cache_control` 本身，不是整个 block 结构。
 
-Separately, if an upstream proxy injects a tool definition into the Anthropic body before
-magpie translates it, the translated Chat body is larger than if translation happened first:
-3275 B vs 2793 B on the same payload (+482 B). Likely just an expected consequence of translating
-an already-augmented body, not a defect — mentioning it only because it changes which side of the
-chain a compression proxy should sit on.
+另外，如果上游代理在 magpie 翻译之前往 Anthropic body 里注入了一个工具定义，
+翻译出来的 Chat body 会比"先翻译、再注入"的顺序更大：同一个负载 3275 B 对 2793 B，
+差 482 B。这大概率只是"翻译一个已经被增强过的 body"的必然结果，不算缺陷，
+提它只是因为这会改变压缩代理该放在链路哪一侧的结论。
