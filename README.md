@@ -85,6 +85,7 @@ curl -s https://usemagpie.ai/api/latest
 | `RESULTS-SAMEMACHINE.md` | 翻译档实测：0D / 0M-L / A-L / B-L / H 五臂 |
 | `RESULTS-PASSTHROUGH.md` | 直通档阴性对照：A-L 与 B-L 逐字节相同 |
 | `RESULTS-LOCAL.md` | 早期单机 0D / H 两臂的记录 |
+| `reports/` | 给上游的报告草稿与发布记录：magpie [Issue #4899](https://github.com/yetone/magpie/issues/4899)、headroom [Discussion #4612](https://github.com/headroomlabs-ai/headroom/discussions/4612) |
 
 ## 跨机抽查（可选）
 

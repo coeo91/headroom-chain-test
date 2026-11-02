@@ -833,3 +833,10 @@ P7c（Responses 形状）两臂只差 11 B，可忽略。
 - `未配对 0 次（其中 N 次靠内容兜底配对）`：N>0 说明翻译档丢了 cid，属正常；未配对本身不为 0 才是问题。
 - P5 前缀稳定性必须"逐轮一致"，否则规则 4 否决，上面的横向比较都不用看。
 - 换了 magpie 版本、换机器、换真实供应商，结论都要重测——本表只覆盖 v0.1.2687 + 假桩 + 构造用例。
+
+### 已提报上游（2026-11-02）
+
+- 兼容性缺陷提给 magpie：<https://github.com/yetone/magpie/issues/4899>（翻译档丢 body `metadata`、`X-Cid` 头、URL 查询串；实测每个臂 63 次里有 6 次只能靠内容兜底配对）。
+- 实测数据贴在 headroom 的 Show and tell：<https://github.com/headroomlabs-ai/headroom/discussions/4612>（该侧没有可报的缺陷，压缩行为与文档一致）。
+
+草稿与发布说明在 [`reports/`](reports/README.md)。
