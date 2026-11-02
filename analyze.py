@@ -12,7 +12,7 @@ import json
 import os
 import statistics
 
-DEFAULT_BASELINE = "0M"
+DEFAULT_BASELINE = None
 
 
 def load_jsonl(path):
@@ -46,11 +46,167 @@ def all_stub_logs(results_dir):
     ]
 
 
-def pair(arm, results_dir):
+def collect_tokens(value, out):
+    """从 payload 里收集字符串标记，用来在 cid 被网关丢掉时认领桩记录。
+
+    只收 5~300 字的串：太短的不够区分（"grep"），太长的多半是会被压缩掉的大块
+    工具输出，压完就不逐字存在于请求体里了。
+    """
+    if isinstance(value, str):
+        s = value.strip()
+        if 5 <= len(s) <= 300:
+            out.add(s)
+    elif isinstance(value, dict):
+        for v in value.values():
+            collect_tokens(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            collect_tokens(v, out)
+
+
+def case_token_sets(manifest, payloads_dir):
+    """{用例: [(轮次或 None, 标记集合)]}。"""
+    out = {}
+    for c in manifest["cases"]:
+        try:
+            with open(os.path.join(payloads_dir, c["file"]), encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+        if c.get("multi_turn"):
+            acc = set()
+            collect_tokens(payload.get("system"), acc)
+            collect_tokens(payload.get("seed_user"), acc)
+            collect_tokens(payload.get("seed_assistant"), acc)
+            sets = []
+            for i, t in enumerate(payload.get("turns") or [], 1):
+                acc = set(acc)
+                collect_tokens(t, acc)
+                sets.append((i, acc))
+            out[c["case"]] = sets
+        else:
+            toks = set()
+            collect_tokens(payload, toks)
+            # 单轮用例在运行记录里 turn 也是 1，两个键都登记上
+            out[c["case"]] = [(None, toks), (1, toks)]
+    return out
+
+
+def body_leaves(value, out):
+    """取出请求体里所有字符串叶子，用于精确匹配标记。"""
+    if isinstance(value, str):
+        out.add(value.strip())
+    elif isinstance(value, dict):
+        for v in value.values():
+            body_leaves(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            body_leaves(v, out)
+
+
+def fallback_pair(runs, stub_records, manifest, payloads_dir):
+    """cid 被网关改协议丢掉时的兜底配对。
+
+    magpie 把 Anthropic/Responses 翻译成 OpenAI Chat 时会丢掉 metadata、X-Cid 头
+    和 URL 查询串，桩那边就没有 cid 了。这种情况下按"用例内容"认领：只有候选用例
+    之间**不共用**的标记才拿来打分（tool_call id、cache_control 标记之类），
+    认不准就不认，宁可留未配对也不把数据配错。
+    """
+    token_sets = case_token_sets(manifest, payloads_dir)
+    if not token_sets:
+        return [], 0
+
+    candidates = {}
+    for r in runs:
+        key = (r.get("case"), r.get("turn"))
+        candidates.setdefault(key, []).append(r)
+
+    own = {}
+    for key in candidates:
+        case, turn = key
+        for t, toks in token_sets.get(case, []):
+            if t == turn:
+                own[key] = toks
+                break
+
+    # 候选用例之间的专属标记
+    case_union = {}
+    for key, toks in own.items():
+        case_union.setdefault(key[0], set()).update(toks)
+    all_cases = set(case_union)
+    distinctive = {}
+    for key, toks in own.items():
+        others = set()
+        for c in all_cases:
+            if c != key[0]:
+                others |= case_union[c]
+        if key[1] is not None:  # 多轮：只看本轮新增的标记
+            prev = own.get((key[0], key[1] - 1), set())
+            distinctive[key] = toks - prev - others
+        else:
+            distinctive[key] = toks - others
+
+    expect = {c["case"]: c for c in manifest["cases"]}
+
+    # 标记稀有度：出现在越多用例里越不值钱（"assistant" 这类几乎每条都有）
+    global_count = {}
+    for sets in token_sets.values():
+        seen = set()
+        for _, toks in sets:
+            seen |= toks
+        for t in seen:
+            global_count[t] = global_count.get(t, 0) + 1
+
+    def weight(t):
+        return 1.0 / global_count.get(t, 1)
+
+    pairs = []
+    used = set()
+    for s in stub_records:
+        leaves = set()
+        body_leaves(s.get("request_json") or {}, leaves)
+        blob = json.dumps(s.get("request_json") or {}, ensure_ascii=False)
+        scored = []
+        for key in candidates:
+            toks = distinctive.get(key)
+            if not toks:
+                continue
+            score = 0.0
+            for t in toks:
+                hit = t in leaves or (len(t) >= 40 and t in blob)
+                if hit:
+                    score += weight(t)
+            if score > 0:
+                scored.append((score, key))
+        if not scored:
+            continue
+        scored.sort(key=lambda x: (-x[0], str(x[1])))
+        if len(scored) > 1 and scored[0][0] - scored[1][0] < 1e-9:
+            continue  # 认不准就不认
+        key = scored[0][1]
+        c = expect.get(key[0]) or {}
+        needle = c.get("needle")
+        if needle and needle not in (s.get("needles") or []):
+            continue
+        et = c.get("expect_tool_count")
+        if et is not None and s.get("tool_count") not in (et, et + 1):
+            continue
+        for r in candidates.get(key, []):
+            if id(r) not in used:
+                pairs.append((r, s))
+                used.add(id(r))
+                break
+    return pairs, len(pairs)
+
+
+def pair(arm, results_dir, manifest=None, payloads_dir="payloads"):
     """按 cid 配对运行记录与桩记录。
 
     不能按下标配对：headroom 会命中响应缓存而跳过上游调用，桩收到的请求数会少于
     发出的请求数，下标会整体错位。
+
+    cid 被网关改协议丢掉时（magpie 翻译 Anthropic/Responses 会丢 metadata），
+    再按内容兜底配对一次。
     """
     runs = load_jsonl(os.path.join(results_dir, "results-%s.jsonl" % arm))
     stub = load_jsonl(os.path.join(results_dir, "stub-%s.jsonl" % arm))
@@ -60,15 +216,21 @@ def pair(arm, results_dir):
         if cid:
             by_cid.setdefault(cid, []).append(s)
     pairs = []
-    unmatched = 0
+    leftover = []
     for r in runs:
         cid = r.get("cid")
         bucket = by_cid.get(cid) if cid else None
         if bucket:
             pairs.append((r, bucket.pop(0)))
         else:
-            unmatched += 1
-    return pairs, unmatched, len(runs), len(stub)
+            leftover.append(r)
+    cidless = [s for s in stub if not s.get("cid")]
+    fallback = 0
+    if leftover and cidless and manifest:
+        extra, fallback = fallback_pair(leftover, cidless, manifest, payloads_dir)
+        pairs.extend(extra)
+    unmatched = len(leftover) - fallback
+    return pairs, unmatched, len(runs), len(stub), fallback
 
 
 def med(xs):
@@ -80,7 +242,7 @@ def fmt_bytes(x):
 
 
 def case_rows(arm, manifest, results_dir):
-    pairs, unmatched, n_runs, n_stub = pair(arm, results_dir)
+    pairs, unmatched, n_runs, n_stub, fallback = pair(arm, results_dir, manifest)
     out = {}
     for c in manifest["cases"]:
         picked = [(r, s) for r, s in pairs if r.get("case") == c["case"]]
@@ -119,6 +281,7 @@ def case_rows(arm, manifest, results_dir):
             "msg_count": first.get("msg_count"),
             "records": picked,
             "unmatched": unmatched,
+            "fallback": fallback,
             "n_runs": n_runs,
             "n_stub": n_stub,
         }
@@ -127,7 +290,7 @@ def case_rows(arm, manifest, results_dir):
 
 def prefix_stability(arm, manifest, results_dir):
     """P5 多轮：第 k 轮请求的前 len(第 k-1 轮) 条消息哈希必须与第 k-1 轮完全一致。"""
-    pairs, _, _, _ = pair(arm, results_dir)
+    pairs, _, _, _, _ = pair(arm, results_dir, manifest)
     picked = [(r, s) for r, s in pairs if r.get("case") == "P5"]
     reps = {}
     for r, s in picked:
@@ -217,7 +380,7 @@ def topology_block(all_rows, manifest, pairs):
     if not usable:
         return []
 
-    lines = ["## 跨机 vs 同机（C 臂）", ""]
+    lines = ["## 跨机 vs 同机（抽查）", ""]
     head = ["用例"]
     for name, _, _ in usable:
         head += ["%s 跨机 Δ" % name, "%s 同机 Δ" % name, "%s 差" % name]
@@ -294,12 +457,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default="results")
     ap.add_argument("--manifest", default="payloads/manifest.json")
-    ap.add_argument("--baseline", default=DEFAULT_BASELINE)
+    ap.add_argument(
+        "--baseline",
+        default=DEFAULT_BASELINE,
+        help="压缩率列的基线臂，默认自动选 0M-L（同机），没有再用 0M",
+    )
     ap.add_argument(
         "--groups",
         action="append",
         metavar="标签:臂1,臂2,...",
-        help="对照表的分组，可重复。默认两个：跨机 A/B 与同机 C 臂",
+        help="对照表的分组，可重复。默认两个：同机主判据与跨机抽查",
     )
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -307,8 +474,8 @@ def main():
     groups = parse_groups(
         args.groups
         or [
-            "跨机 magpie（A/B 主判据）:0D,0M,A,B",
-            "同机 magpie（C 臂）:0D,0M-L,A-L,B-L",
+            "同机 magpie（主判据）:0D,0M-L,A-L,B-L",
+            "跨机 magpie（部署前抽查）:0D,0M,A,B",
         ]
     )
 
@@ -323,14 +490,17 @@ def main():
     for arm in arms:
         all_rows[arm] = case_rows(arm, manifest, args.results)
 
-    base_rows = all_rows.get(args.baseline, {})
+    baseline = args.baseline or next(
+        (a for a in ("0M-L", "0M", "0D") if a in all_rows), "0D"
+    )
+    base_rows = all_rows.get(baseline, {})
     if not base_rows:
-        print("注意：没找到基线臂 %s，压缩率列留空" % args.baseline)
+        print("注意：没找到基线臂 %s，压缩率列留空" % baseline)
 
     out = []
     out.append("# headroom 链路对照结果")
     out.append("")
-    out.append("基线臂 = `%s`（两臂去掉 headroom 后的同一拓扑）" % args.baseline)
+    out.append("基线臂 = `%s`（两臂去掉 headroom 后的同一拓扑）" % baseline)
     out.append("")
     out.append("每组里：第一列绝对字节，第二列相对第一列，其余相对第二列（即同一拓扑下\"加不加 headroom\"）。")
     out.append("")
@@ -345,12 +515,14 @@ def main():
         out.extend(compare_block(all_rows, manifest, label, g_arms))
 
     for arm in arms:
-        out.extend(table(arm, all_rows[arm], base_rows, args.baseline))
+        out.extend(table(arm, all_rows[arm], base_rows, baseline))
         any_row = next(iter(all_rows[arm].values()), None)
         if any_row:
+            fb = any_row.get("fallback") or 0
+            fb_note = "（其中 %d 次靠内容兜底配对：网关改协议丢了 cid）" % fb if fb else ""
             out.append(
-                "- 臂 %s 配对：发出 %d 次，桩收到 %d 次，未配对 %d 次"
-                % (arm, any_row["n_runs"], any_row["n_stub"], any_row["unmatched"])
+                "- 臂 %s 配对：发出 %d 次，桩收到 %d 次，未配对 %d 次%s"
+                % (arm, any_row["n_runs"], any_row["n_stub"], any_row["unmatched"], fb_note)
             )
     out.append("")
 
@@ -408,30 +580,55 @@ def main():
     else:
         v.append(("V3 H 臂对 P1/P2 有真实压缩", False, "缺 H 或 0D 臂"))
 
-    for x, y in (("A", "B"), ("A-L", "B-L")):
-        if x not in all_rows or y not in all_rows:
+    for x, y, base in (("A", "B", "0M"), ("A-L", "B-L", "0M-L")):
+        if x not in all_rows or y not in all_rows or base not in all_rows:
             continue
-        same = []
-        for c in manifest["cases"]:
-            a = all_rows[x].get(c["case"], {}).get("bytes")
-            b = all_rows[y].get(c["case"], {}).get("bytes")
-            if a is not None and b is not None and a == b:
-                same.append(c["case"])
-        tried = [
-            c["case"]
-            for c in manifest["cases"]
-            if all_rows[x].get(c["case"], {}).get("bytes") is not None
-            and all_rows[y].get(c["case"], {}).get("bytes") is not None
-        ]
+        # V5：两条臂相对各自基线都要真的压缩过，说明中间层确实在链路里
+        squeezed = {}
+        for arm in (x, y):
+            hits = []
+            for c in manifest["cases"]:
+                a = all_rows[arm].get(c["case"], {}).get("bytes")
+                b = all_rows[base].get(c["case"], {}).get("bytes")
+                if a is not None and b is not None and a < b:
+                    hits.append(c["case"])
+            squeezed[arm] = hits
+        ok = bool(squeezed[x]) and bool(squeezed[y])
+        detail = "；".join(
+            "%s 压缩了 %s" % (arm, ",".join(squeezed[arm]) or "无") for arm in (x, y)
+        )
         v.append(
             (
-                "V5 %s 与 %s 的请求体不完全相同（相同说明中间层没生效）" % (x, y),
-                not same,
-                ("完全相同的用例：" + ",".join(same)) if same else "%d/%d 个用例存在差异" % (len(tried), len(tried)),
+                "V5 %s 与 %s 相对 %s 都真的有压缩（中间层确实在链路里）" % (x, y, base),
+                ok,
+                detail,
             )
         )
 
+        # V7：A 与 B 的逐用例差异——这才是"位置有没有用"的测量结果
+        same = []
+        diff = []
+        for c in manifest["cases"]:
+            a = all_rows[x].get(c["case"], {}).get("bytes")
+            b = all_rows[y].get(c["case"], {}).get("bytes")
+            if a is None or b is None:
+                continue
+            if a == b:
+                same.append(c["case"])
+            else:
+                diff.append("%s(%s %+d B)" % (c["case"], x, b - a))
+        if same or diff:
+            v.append(
+                (
+                    "V7 %s 与 %s 的请求体差异分布（信息项）" % (x, y),
+                    True,
+                    "完全相同：%s；不同：%s"
+                    % (",".join(same) or "无", ", ".join(diff) or "无"),
+                )
+            )
+
     if "0M-L" in all_rows and ("A-L" in all_rows or "B-L" in all_rows):
+        cross_ok = any(a in all_rows for a in ("0M", "A", "B"))
         rows = []
         for pname, cross, local in (("A", ("0M", "A"), ("0M-L", "A-L")), ("B", ("0M", "B"), ("0M-L", "B-L"))):
             if not all(a in all_rows for a in cross + local):
@@ -454,7 +651,7 @@ def main():
                 not bad,
                 ("方向相反的用例：%s" % "、".join("%s/%s" % (r[0], r[1]) for r in bad))
                 if bad
-                else "%d 个有明显压缩的用例方向一致" % len(rows),
+                else ("%d 个有明显压缩的用例方向一致" % len(rows) if cross_ok else "没跑跨机抽查，本条不适用"),
             )
         )
 

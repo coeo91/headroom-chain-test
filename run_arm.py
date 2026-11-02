@@ -48,6 +48,11 @@ def stamp(body, proto, cid):
 
 
 def post(url, body, proto, key, arm, cid):
+    # cid 挂三处：metadata/user（body）、X-Cid（头）、URL 查询串。
+    # 头和 body 里的 cid 会被"翻译型"网关丢掉（magpie 改协议时丢 metadata），
+    # 查询串是最后一道保险。
+    sep = "&" if "?" in url else "?"
+    url = "%s%scid=%s" % (url, sep, cid)
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")

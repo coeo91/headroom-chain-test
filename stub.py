@@ -74,6 +74,95 @@ def count_cache_control(obj):
     return n
 
 
+def sse_events(path, rec, text):
+    """按三种协议产出 SSE 事件序列，内容与各自的非流式响应一致。"""
+    model = rec.get("model") or "stub-model"
+    if path.endswith("/messages"):
+        yield ("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": "msg_stub_0001", "type": "message", "role": "assistant",
+                "model": model, "content": [], "stop_reason": None,
+                "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        })
+        yield ("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        yield ("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": text},
+        })
+        yield ("content_block_stop", {"type": "content_block_stop", "index": 0})
+        yield ("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 1},
+        })
+        yield ("message_stop", {"type": "message_stop"})
+        return
+
+    if path.endswith("/responses"):
+        resp = {
+            "id": "resp_stub", "object": "response", "created_at": int(time.time()),
+            "model": model, "status": "in_progress", "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+        }
+        yield ("response.created", {"type": "response.created", "response": resp})
+        yield ("response.in_progress", {"type": "response.in_progress", "response": resp})
+        yield ("response.output_item.added", {
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {
+                "type": "message", "id": "msg_stub", "role": "assistant",
+                "status": "in_progress", "content": [],
+            },
+        })
+        yield ("response.content_part.added", {
+            "type": "response.content_part.added", "item_id": "msg_stub",
+            "output_index": 0, "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        })
+        yield ("response.output_text.delta", {
+            "type": "response.output_text.delta", "item_id": "msg_stub",
+            "output_index": 0, "content_index": 0, "delta": text,
+        })
+        yield ("response.output_text.done", {
+            "type": "response.output_text.done", "item_id": "msg_stub",
+            "output_index": 0, "content_index": 0, "text": text,
+        })
+        yield ("response.content_part.done", {
+            "type": "response.content_part.done", "item_id": "msg_stub",
+            "output_index": 0, "content_index": 0,
+            "part": {"type": "output_text", "text": text, "annotations": []},
+        })
+        yield ("response.output_item.done", {
+            "type": "response.output_item.done", "output_index": 0,
+            "item": {
+                "type": "message", "id": "msg_stub", "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            },
+        })
+        done = dict(resp)
+        done["status"] = "completed"
+        done["output"] = [{
+            "type": "message", "id": "msg_stub", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }]
+        done["usage"] = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        yield ("response.completed", {"type": "response.completed", "response": done})
+        return
+
+    chunk = {
+        "id": "chatcmpl-stub", "object": "chat.completion.chunk",
+        "created": int(time.time()), "model": model,
+    }
+    yield (None, dict(chunk, choices=[{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]))
+    yield (None, dict(chunk, choices=[{"index": 0, "delta": {"content": text}, "finish_reason": None}]))
+    yield (None, dict(chunk, choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}]))
+
+
 def split_request(body, path):
     """把三种协议归一成 (shape, system, messages, tools)。"""
     if path.endswith("/messages"):
@@ -121,8 +210,12 @@ def null_content_tool_calls(msgs):
     return n
 
 
-def extract_cid(body, headers):
-    """关联 id：客户端放进 metadata / user / model 后缀，网关一般原样透传。"""
+def extract_cid(body, headers, query=""):
+    """关联 id：客户端放进 metadata / user / model 后缀 / query，网关一般原样透传。
+
+    query 这一路是给"网关会改协议"的场景留的：magpie 翻译 Anthropic/Responses
+    时会丢掉 metadata，于是 cid 只能从 URL 查询串里捞回来。
+    """
     meta = body.get("metadata")
     if isinstance(meta, dict):
         for k in ("cid", "user_id"):
@@ -133,10 +226,14 @@ def extract_cid(body, headers):
     model = body.get("model")
     if isinstance(model, str) and "|cid=" in model:
         return model.split("|cid=", 1)[1]
+    if query:
+        for part in query.split("&"):
+            if part.startswith("cid="):
+                return part[4:]
     return headers.get("x-cid")
 
 
-def build_record(raw, path, headers):
+def build_record(raw, path, headers, query=""):
     text = raw.decode("utf-8", "replace")
     try:
         body = json.loads(text)
@@ -187,14 +284,16 @@ def build_record(raw, path, headers):
         "host": headers.get("Host") or ("127.0.0.1:%d" % PORT),
         "url": "http://%s%s" % (headers.get("Host") or ("127.0.0.1:%d" % PORT), path),
         "path": path,
+        "query": query,
         "proto_shape": shape,
-        "cid": extract_cid(body, headers),
+        "cid": extract_cid(body, headers, query),
         "body_bytes": len(raw),
         "request_body_size": len(raw),
         "request_body_sha256": hashlib.sha256(raw).hexdigest(),
         "request_headers": sanitize_headers(dict(headers)),
         "request_json": body,
         "model": body.get("model"),
+        "stream": bool(body.get("stream")),
         "system_sha256": sha(canon(system)) if system is not None else None,
         "msg_count": len(msgs),
         "msg_hashes": [sha(canon(m)) for m in msgs],
@@ -283,13 +382,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        query = self.path.partition("?")[2]
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             n = 0
         raw = self.rfile.read(n) if n else b""
 
-        rec = build_record(raw, path, self.headers)
+        rec = build_record(raw, path, self.headers, query)
         rec["response_status"] = 401 if FORCE_401 else 200
         rec["response_headers"] = {"content-type": "application/json"}
         log_record(rec)
@@ -311,11 +411,37 @@ class Handler(BaseHTTPRequestHandler):
         if ECHO_BYTES:
             text += " bytes=%d" % len(raw)
 
+        if rec.get("stream"):
+            return self._send_sse(path, rec, text)
+
         if path.endswith("/messages"):
             return self._send(200, self._anthropic(rec, text))
         if path.endswith("/responses"):
             return self._send(200, self._responses(rec, text))
         return self._send(200, self._chat(rec, text))
+
+    def _send_sse(self, path, rec, text):
+        """按请求的协议吐 SSE。
+
+        magpie 往上游发的是流式请求（哪怕客户端要的是非流式），桩不会流式就会
+        被判成 "did not stream" 而返回 502。
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for name, data in sse_events(path, rec, text):
+            if name:
+                self.wfile.write(("event: %s\n" % name).encode("utf-8"))
+            self.wfile.write(("data: " + json.dumps(data, ensure_ascii=False) + "\n\n").encode("utf-8"))
+            self.wfile.flush()
+        if path.endswith("/responses"):
+            pass
+        else:
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        self.close_connection = True
 
     @staticmethod
     def _anthropic(rec, text):
