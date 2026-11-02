@@ -716,10 +716,10 @@ STUB_PORT=18080 .venv/Scripts/python.exe stub.py > logs/stub.log 2>&1 &
 | P3 | 19056 | 19056 | 19189 | 19189 | 100.7% | 100.7% | OK | OK | OK | openai_chat/openai_chat | 1/0 | 0 | 日志压不动，真实透传验证 |
 | P4 | 23087 | 23087 | 23569 | 23569 | 102.1% | 102.1% | OK | OK | OK | openai_chat/openai_chat | 1/0 | 0 | Read 被排除，仅 +CCR 工具开销 |
 | P5 | 416692 | 416692 | 415804 | 415804 | 99.8% | 99.8% | OK | OK | OK | openai_chat/openai_chat | 0/0 | 0 | cache mode 冻结前 2/3，种子工具被冻结 |
-| P6 | 1178 | 1178 | 1616 | 1616 | 137.2% | 137.2% | OK | OK | OK | openai_chat/openai_chat | 0/0 | 3/3 | 小请求，全是注入开销 |
-| P7a | 2646 | 2646 | 3275 | 2793 | +493 (117.7%) | +11 (100.4%) | OK | OK | OK | anthropic/anthropic | 12/12 | 1/1 | **关键对比**：A-L 比 B-L 多 482 B（A 里 headroom 在 magpie 上游，magpie 翻译时保留 headroom 注入的工具/cc；B 里 magpie 先翻译，headroom 只看到翻译后的 OpenAI Chat 格式，不再额外注入） |
+| P6 | 1178 | 1178 | 1616 | 1616 | 137.2% | 137.2% | OK | OK | OK | openai_chat/openai_chat | 1/0 | 3/3 | 小请求，全是注入开销 |
+| P7a | 2646 | 2782 | 3275 | 2793 | +493 (117.7%) | +11 (100.4%) | OK | OK | OK | openai_chat/anthropic | 13/12（A）·12/12（B） | 0/1 | **关键对比**：A-L 比 B-L 多 482 B（A 里 headroom 在 magpie 上游，magpie 翻译时保留 headroom 注入的工具；B 里 magpie 先翻译，headroom 只看到翻译后的 OpenAI Chat 格式，不再额外注入）。cc 两臂都是 0/1——翻译档把 `cache_control` 丢了 |
 | P7b | 2985 | 2985 | 3254 | 3254 | +269 (109.0%) | +269 (109.0%) | OK | OK | OK | openai_chat/openai_chat | 13/12 | 0 | 工具数 +1，符合 headroom 注入 |
-| P7c | 2790 | 2790 | 2780 | 2791 | +0 (100.0%) | +11 (100.4%) | OK | OK | OK | openai_responses/openai_responses | 12/12 | 0 | Responses 形状不变 |
+| P7c | 2790 | 2780 | 2780 | 2791 | +0 (100.0%) | +11 (100.4%) | OK | OK | OK | openai_chat/openai_responses | 12/12 | 0 | Responses 形状不变 |
 | P8 | 33471 | 33471 | 33973 | 33973 | +502 (101.5%) | +502 (101.5%) | OK | OK | OK | openai_chat/openai_chat | 1/0 | 0 | 用户消息受保护，**不压缩** |
 
 ### 直通档（magpie 逐字节透传）
@@ -731,8 +731,8 @@ STUB_PORT=18080 .venv/Scripts/python.exe stub.py > logs/stub.log 2>&1 &
 | P3 | 19056 | 19056 | 19189 | 19189 | 100.7% | 100.7% | OK | OK | OK | openai_chat/openai_chat | 1/0 | 0 | A-L ≡ B-L 逐字节相同 |
 | P4 | 23087 | 23087 | 23569 | 23569 | 102.1% | 102.1% | OK | OK | OK | openai_chat/openai_chat | 1/0 | 0 | A-L ≡ B-L 逐字节相同 |
 | P5 | 416692 | 416692 | 415804 | 415804 | 99.8% | 99.8% | OK | OK | OK | openai_chat/openai_chat | 0/0 | 0 | A-L ≡ B-L 逐字节相同 |
-| P6 | 1178 | 1178 | 1616 | 1616 | 137.2% | 137.2% | OK | OK | OK | openai_chat/openai_chat | 0/0 | 3/3 | A-L ≡ B-L 逐字节相同 |
-| P7a | 2646 | 2646 | 2973 | 2973 | +296 (111.1%) | +296 (111.1%) | OK | OK | OK | anthropic/anthropic | 13/12 | 2/1 | A-L ≡ B-L 完全相同 |
+| P6 | 1178 | 1178 | 1616 | 1616 | 137.2% | 137.2% | OK | OK | OK | openai_chat/openai_chat | 1/0 | 3/3 | A-L ≡ B-L 逐字节相同 |
+| P7a | 2646 | 2677 | 2973 | 2973 | +296 (111.1%) | +296 (111.1%) | OK | OK | OK | anthropic/anthropic | 13/12 | 2/1 | A-L ≡ B-L 完全相同；`cache_control` 被保留（2/1 即原 1 个 + headroom 注入 1 个） |
 | P7b | 2985 | 2985 | 3254 | 3254 | +269 (109.0%) | +269 (109.0%) | OK | OK | OK | openai_chat/openai_chat | 13/12 | 0 | A-L ≡ B-L 完全相同 |
 | P7c | 2790 | 2790 | 2790 | 2790 | +0 (100.0%) | +0 (100.0%) | OK | OK | OK | openai_responses/openai_responses | 12/12 | 0 | A-L ≡ B-L 完全相同 |
 | P8 | 33471 | 33471 | 33973 | 33973 | +502 (101.5%) | +502 (101.5%) | OK | OK | OK | openai_chat/openai_chat | 1/0 | 0 | A-L ≡ B-L 完全相同，用户消息不压缩 |
