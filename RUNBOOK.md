@@ -839,4 +839,6 @@ P7c（Responses 形状）两臂只差 11 B，可忽略。
 - 兼容性缺陷提给 magpie：<https://github.com/yetone/magpie/issues/4899>（翻译档丢 body `metadata`、`X-Cid` 头、URL 查询串；实测每个臂 63 次里有 6 次只能靠内容兜底配对）。
 - 实测数据贴在 headroom 的 Show and tell：<https://github.com/headroomlabs-ai/headroom/discussions/4612>（该侧没有可报的缺陷，压缩行为与文档一致）。
 
+**维护者裁定（2026-11-05，yetone 本人在 #4899 回复）**：审阅后**拒绝合并** ggbdpq 的修复补丁，理由是补丁会把 Claude Code 的 `metadata.user_id`（账号 UUID + 会话）转发给每个第三方 Chat 供应商、给订阅制供应商发 `X-Cid` 头使其可指纹识别 magpie、查询串过滤用的是黑名单。结论：关联载体的保留只能做成**窄口径 opt-in**，做不做等维护者拍板，issue 保持 open。含义：翻译档丢载体在可预见版本里**不会默认修复**；另据 ggbdpq 的 probe，当前 main 上连直通档也只保住 body `metadata`（`X-Cid` 和查询串仍丢），与 0.1.2687 的直通档三样全保属版本差异。本仓库的判定（选 B、不依赖 magpie 改行为）不受影响，反而被加固。
+
 草稿与发布说明在 [`reports/`](reports/README.md)。
